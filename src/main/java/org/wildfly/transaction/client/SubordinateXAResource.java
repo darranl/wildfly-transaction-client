@@ -23,6 +23,8 @@ import static java.lang.Math.min;
 
 import java.io.Serializable;
 import java.net.URI;
+import java.security.PrivilegedActionException;
+import java.security.PrivilegedExceptionAction;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -34,7 +36,9 @@ import javax.transaction.xa.Xid;
 
 import org.wildfly.common.Assert;
 import org.wildfly.common.annotation.NotNull;
+import org.wildfly.security.auth.client.AuthenticationContext;
 import org.wildfly.transaction.client._private.Log;
+import org.wildfly.transaction.client.spi.RemoteTransactionPeer;
 import org.wildfly.transaction.client.spi.RemoteTransactionProvider;
 import org.wildfly.transaction.client.spi.SubordinateTransactionControl;
 
@@ -47,6 +51,7 @@ final class SubordinateXAResource implements XAResource, XARecoverable, Serializ
     private final URI location;
     private final String parentName;
     private final XAResourceRegistry resourceRegistry;
+    private final AuthenticationContext authenticationContext;
     private volatile int timeout = LocalTransactionContext.DEFAULT_TXN_TIMEOUT;
     private long startTime = 0L;
     private volatile Xid xid;
@@ -58,6 +63,7 @@ final class SubordinateXAResource implements XAResource, XARecoverable, Serializ
         this.location = location;
         this.parentName = parentName;
         this.resourceRegistry = recoveryRegistry;
+        this.authenticationContext = AuthenticationContext.captureCurrent();
     }
 
     SubordinateXAResource(final URI location, final String parentName, final int flags, XAResourceRegistry recoveryRegistry) {
@@ -70,6 +76,7 @@ final class SubordinateXAResource implements XAResource, XARecoverable, Serializ
         this.parentName = parentName;
         stateRef.set(flags);
         this.resourceRegistry = null;
+        this.authenticationContext = AuthenticationContext.captureCurrent();
     }
 
     Xid getXid() {
@@ -186,7 +193,7 @@ final class SubordinateXAResource implements XAResource, XARecoverable, Serializ
     }
 
     private SubordinateTransactionControl lookup(final Xid xid) throws XAException {
-        return getProvider().getPeerHandleForXa(location, null, null).lookupXid(xid);
+        return getRemoteTransactionPeer().lookupXid(xid);
     }
 
     private RemoteTransactionProvider getProvider() {
@@ -198,7 +205,20 @@ final class SubordinateXAResource implements XAResource, XARecoverable, Serializ
     }
 
     public Xid[] recover(final int flag, final String parentName) throws XAException {
-        return getProvider().getPeerHandleForXa(location, null, null).recover(flag, parentName);
+        return getRemoteTransactionPeer().recover(flag, parentName);
+    }
+
+    private RemoteTransactionPeer getRemoteTransactionPeer() throws XAException {
+        try {
+            return authenticationContext.run((PrivilegedExceptionAction<RemoteTransactionPeer>) () -> getProvider().getPeerHandleForXa(location, null, null));
+        } catch (PrivilegedActionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof XAException) {
+                throw (XAException) cause;
+            }
+
+            throw new RuntimeException(e);
+        }
     }
 
     public boolean isSameRM(final XAResource xaRes) throws XAException {
